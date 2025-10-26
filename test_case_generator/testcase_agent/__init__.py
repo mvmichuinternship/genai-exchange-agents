@@ -13,5 +13,6 @@
 # limitations under the License.
 
 from .agent import root_agent
+from .templates import TestCase, TestSuite
 
-__all__ = ["root_agent"]
+__all__ = ["root_agent", "TestSuite", "TestCase"]
