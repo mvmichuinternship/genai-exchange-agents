@@ -1,0 +1,6 @@
+google-adk[a2a]
+google-cloud-aiplatform
+vertexai
+google-genai
+uvicorn[standard]
+fastapi
