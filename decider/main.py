@@ -1,46 +1,30 @@
-import asyncio
-from google.adk.sessions import InMemorySessionService
-from google.genai import types
-from agent import decider_agent  # Your fixed agent
+import os
+import uvicorn
+from fastapi import FastAPI
+from google.adk.cli.fast_api import get_fast_api_app
 
-async def run_decider_session():
-    """
-    Simple interactive runner for Decider.
-    """
-    session_service = InMemorySessionService()
-    session = await session_service.create_session(app_name="decider", user_id="local")
+# Get the directory where main.py is located
+AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-    print("Decider Started! Type 'quit' to exit.\n")
+# Session service URI - using in-memory for simplicity
+# For production, consider using a database session service
+SESSION_SERVICE_URI = os.getenv("DB_CONNECTION", "postgresql://testgen_user:testgen_pass@localhost:5432/testgen_db")
 
-    try:
-        while True:
-            user_message = input("You: ").strip()
-            if user_message.lower() in ['quit', 'exit', 'q']:
-                break
-            if not user_message:
-                continue
+# Allowed origins for CORS
+ALLOWED_ORIGINS = ["*"]
 
-            # Use string message (ADK Agent supports direct str; fallback to Content)
-            try:
-                async for event in decider_agent.async_stream_query(
-                    user_id="local",
-                    session_id=session.id,
-                    message=user_message  # Direct str (simpler)
-                ):
-                    if hasattr(event, 'content') and event.content.parts:
-                        text = event.content.parts[0].text
-                        print(f"Decider: {text}", end="", flush=True)
-                    else:
-                        print(f"[Event: {getattr(event, 'event_type', 'unknown')}]", end="")
-                print("\n" + "="*50)
-            except Exception as e:
-                print(f"Invocation error: {e}")
+# Enable web interface for testing
+SERVE_WEB_INTERFACE = True
 
-    except KeyboardInterrupt:
-        print("\nExiting...")
-    finally:
-        # Sync delete (no await)
-        session_service.delete_session(session.id)
+# Create the FastAPI app
+app: FastAPI = get_fast_api_app(
+    agents_dir=AGENT_DIR,
+    session_service_uri=SESSION_SERVICE_URI,
+    allow_origins=ALLOWED_ORIGINS,
+    web=SERVE_WEB_INTERFACE,
+)
 
 if __name__ == "__main__":
-    asyncio.run(run_decider_session())
+    # Use PORT environment variable provided by Cloud Run
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run(app, host="0.0.0.0", port=port)
