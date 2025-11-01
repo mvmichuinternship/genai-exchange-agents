@@ -345,13 +345,14 @@
 from google.adk.agents import Agent
 from a2a.client import ClientFactory, ClientConfig
 from a2a.types import TransportProtocol
-from google.adk.tools import FunctionTool
+from google.adk.tools import FunctionTool, AgentTool
 import httpx
 from google.auth import default
 from google.auth.transport.requests import Request
 from google.adk.agents.remote_a2a_agent import RemoteA2aAgent
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 import uuid
+from toolbox_core import ToolboxSyncClient, auth_methods
 
 
 PROJECT_ID = "195472357560"
@@ -363,6 +364,11 @@ ANALYZER_CARD_URL = f"https://{LOCATION}-aiplatform.googleapis.com/v1beta1/proje
 GENERATOR_CARD_URL = f"https://{LOCATION}-aiplatform.googleapis.com/v1beta1/projects/{PROJECT_ID}/locations/{LOCATION}/reasoningEngines/{GENERATOR_RESOURCE_ID}/a2a/v1/card"
 
 agent_state: Dict[str, Any] = {}
+
+URL = "https://toolbox-195472357560.us-central1.run.app"
+auth_token_provider = auth_methods.aget_google_id_token(URL)
+toolbox = ToolboxSyncClient(URL, client_headers={"Authorization": auth_token_provider})
+tools = toolbox.load_toolset()
 
 def create_client_factory():
     credentials, _ = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
@@ -398,69 +404,96 @@ def create_remote_agents():
         a2a_client_factory=create_client_factory(),
     )
 
-    return requirement_analyzer, test_case_generator
+    requirement_analyzer_tool = AgentTool(
+        agent=requirement_analyzer,
+        )
 
-async def execute_workflow(status: str, user_input: str, session_id: Optional[str] = None) -> Dict[str, Any]:
+    test_case_generator_tool = AgentTool(
+        agent=test_case_generator,
+        )
+
+    return requirement_analyzer_tool, test_case_generator_tool
+
+async def execute_workflow(status: str, user_input: str, session_id: str) -> Dict[str, Any]:
     """
-    Execute workflow based on status.
+    Execute workflow based on status with clear delegation rules.
 
     Args:
         status: Workflow status - 'start', 'approved', 'edited', or 'rejected'
         user_input: User input text for the workflow
-        session_id: Optional session ID for tracking workflow state
+        session_id: Required session ID for tracking workflow state (no longer optional)
 
     Returns:
-        Workflow result with status, stage, and relevant data
+        Workflow result with status, stage, delegate_to, and relevant data
     """
     global agent_state
 
     status = status.strip().lower()
     user_input = user_input.strip()
 
-    if session_id is None:
-        session_id = str(uuid.uuid4())
+    # Store session_id as a variable for consistent usage
+    current_session_id = session_id.strip()
 
-    if session_id not in agent_state:
-        agent_state[session_id] = {}
+    if current_session_id not in agent_state:
+        agent_state[current_session_id] = {}
 
-    session_data = agent_state[session_id]
+    session_data = agent_state[current_session_id]
 
     if status == "start":
-        # The root agent will delegate to requirement_analyzer sub-agent
-        # Store the user input for the analyzer
+        # STEP 1: Delegate to requirement_analyzer, then store response in requirements table (original_content)
         session_data["analyzer_input"] = user_input
+        session_data["current_status"] = "analyzing"
         return {
             "status": "delegating",
-            "stage": "analyzing",
+            "stage": "analyzing_requirements",
             "delegate_to": "requirement_analyzer",
             "input": user_input,
-            "session_id": session_id
+            "session_id": current_session_id,
+            "next_action": "store_original_requirements_to_db"
         }
 
-    elif status in {"approved", "edited"}:
-        input_text = user_input if status == "edited" else session_data.get("last_analysis", "")
-
-        # The root agent will delegate to test_case_generator sub-agent
+    elif status == "edited":
+        # STEP 2: Update requirements table (edited_content) then delegate to test_case_generator
+        session_data["edited_input"] = user_input
+        session_data["current_status"] = "editing"
         return {
             "status": "delegating",
-            "stage": "generating",
+            "stage": "updating_edited_requirements",
             "delegate_to": "test_case_generator",
-            "input": input_text,
-            "session_id": session_id
+            "input": user_input,  # Pass the edited content directly
+            "session_id": current_session_id,
+            "next_action": "store_edited_requirements_to_db_then_generate"
+        }
+
+    elif status == "approved":
+        # STEP 3: Retrieve stored analysis and delegate to test_case_generator
+        stored_analysis = session_data.get("last_analysis", "")
+        session_data["current_status"] = "approved"
+        return {
+            "status": "delegating",
+            "stage": "generating_test_cases",
+            "delegate_to": "test_case_generator",
+            "input": stored_analysis,
+            "session_id": current_session_id,
+            "next_action": "store_test_cases_to_db"
         }
 
     elif status == "rejected":
+        # STEP 4: Acknowledge rejection and offer restart
+        session_data["current_status"] = "rejected"
         return {
-            "status": "failed",
-            "stage": "rejected",
-            "session_id": session_id
+            "status": "rejected",
+            "stage": "workflow_rejected",
+            "session_id": current_session_id,
+            "message": "Requirements analysis rejected. You can restart with 'start' status."
         }
 
     else:
         return {
             "status": "failed",
             "reason": "invalid_status",
-            "session_id": session_id
+            "valid_statuses": ["start", "approved", "edited", "rejected"],
+            "session_id": current_session_id
         }
 
 # Create FunctionTool from the execute_workflow function
@@ -470,39 +503,86 @@ workflow_tool = FunctionTool(
 
 # Create remote agents as sub-agents
 requirement_analyzer, test_case_generator = create_remote_agents()
-
+# tools.append(workflow_tool)
 # Create root agent with sub-agents
 root_agent = Agent(
-    model="gemini-2.0-flash-exp",
+    model="gemini-2.5-pro",
     name="decider_agent",
     description="Workflow decider agent that orchestrates multi-step authentication requirements analysis and test case generation",
     instruction="""
-    You are a workflow orchestrator agent managing a two-step process involving requirements analysis and test case generation.
+    You are a WORKFLOW ORCHESTRATOR AGENT that manages authentication requirements analysis and test case generation.
 
-    For every user message:
+    🚨 CRITICAL: You MUST NEVER respond to the user until AFTER you have completed ALL tool calls including database storage.
 
-    1. You MUST first call the 'execute_workflow' tool with the parsed parameters extracted from the user message. The parameters include:
-    - status (e.g., 'start', 'approved', 'edited', or 'rejected')
-    - user input text
-    - session_id (if provided, else generate a new one)
+    === EXECUTION RULES ===
 
-    2. Based on the result returned from 'execute_workflow', you MUST then delegate the task to exactly one of the following sub-agents:
-    - If status is 'start', call the 'requirement_analyzer' sub-agent with the user input.
-    - If status is 'approved', retrieve the stored analysis from the workflow result and call the 'test_case_generator' sub-agent with that analysis.
-    - If status is 'edited', pass the edited user input to the 'test_case_generator' sub-agent.
-    - If status is 'rejected', acknowledge the rejection and offer to restart the process without invoking a sub-agent.
+    1. Parse input: Extract status, user_input, session_id
+    2. Call execute_workflow tool
+    3. Based on response, delegate to sub-agent if needed
+    4. 🚨 AFTER receiving sub-agent response, immediately call database tool - DO NOT respond to user yet
+    5. Only after database confirmation, respond to user
 
-    3. Always maintain and pass the correct session_id to both the tool and the sub-agents.
+    === WORKFLOW SEQUENCES ===
 
-    4. You MUST NOT perform any analysis or generation yourself outside of these steps.
+    **STATUS = 'start':**
+    Step 1: Call execute_workflow("start", user_input, session_id)
+    Step 2: Delegate to requirement_analyzer sub-agent with user_input
+    Step 3: AWAIT the analyzer agent response and 🚨 IMMEDIATELY after receiving analyzer response, ANALYZE if the response is GDPR COMPLIANT. If yes, CALL TOOL store-requirement tool:
+       - session_id: session_id from request
+       - original_content: [full text from analyzer response]
+       - requirement_type: "functional"
+       - priority: "medium"
+    Step 4: After database confirms storage, respond to user with summary
 
-    5. Return all responses from both the tool and sub-agent calls back to the user.
+    **STATUS = 'edited':**
+    Step 1: Call execute_workflow("edited", user_input, session_id)
+    Step 2: Call update-requirement tool with edited content:
+       - session_id: session_id from request
+       - content: "EDITED: " + user_input
+       - requirement_type: "functional"
+       - priority: "high"
 
-    Follow this flow strictly to ensure proper sequential execution.
+    **STATUS = 'approved':**
+    Step 1: Call execute_workflow("approved", "", session_id)
+    Step 2: Call get-requirements tool with session_id
+    Step 3: Delegate to test_case_generator with retrieved requirements with the edited_analysis field value.
+    Step 4: 🚨 AWAIT the generator agent response and IMMEDIATELY after receiving generator response, CHECK for GDPR COMPLIANCE and CALL TOOL store-test-case for each test case:
+       - session_id: session_id from request
+       - test_case_id: unique ID for each test case
+       - content: [test case content from generator]
+    Step 5: After all test cases stored, respond to user
 
-    Always track session_id throughout the workflow. Extract it from user messages or generate a new one.
-    When responding to the user, always provide a clear, concise English explanation, followed by any relevant details.
-    NEVER attempt to analyze or generate content yourself - ALWAYS delegate to the appropriate sub-agent as per the workflow.""",
-    sub_agents=[requirement_analyzer, test_case_generator],
-    tools=[workflow_tool],
+    **STATUS = 'rejected':**
+    Step 1: Call execute_workflow("rejected", "", session_id)
+    Step 2: Respond with rejection acknowledgment
+
+    🚨 CRITICAL BEHAVIOR RULES 🚨
+
+    1. **DO NOT say anything to the user until database storage is complete**
+    2. **Sub-agent responses are intermediate data - NOT final responses**
+    3. **Every sub-agent call must be followed by a database tool call**
+    4. **The database tool call happens AUTOMATICALLY - you don't wait for user permission**
+    5. **Your thinking process:**
+       - "Got sub-agent response" → "Now I must call database tool" → "Database confirmed" → "Now I can respond to user"
+
+    🔒 CORRECT BEHAVIOR EXAMPLE:
+    - User: "start session_123 analyze login flow"
+    - You: [Call execute_workflow]
+    - You: [Call requirement_analyzer sub-agent]
+    - You: [Receive analyzer response: "Authentication requires OAuth 2.0..."]
+    - You: [IMMEDIATELY call store-requirement with that response]
+    - You: [Get database confirmation]
+    - You: "I've analyzed and stored your requirements. The analysis shows authentication requires OAuth 2.0..."
+
+    ❌ WRONG BEHAVIOR (what you're doing now):
+    - You: [Call requirement_analyzer]
+    - You: "Here's the analysis: [analyzer response]" ← WRONG! Database not called yet!
+
+    The key is: Think of the sub-agent response as data you need to process (store in DB) before reporting to the user.
+    You are a DATA PROCESSOR, not a messenger. Process first, report after.
+
+    Remember: execute_workflow → sub-agent → database tool → user response
+    NEVER skip the database tool step!""",
+    sub_agents=[],
+    tools=[workflow_tool, *tools, requirement_analyzer, test_case_generator],
 )

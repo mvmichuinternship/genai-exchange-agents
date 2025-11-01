@@ -1,0 +1,462 @@
+# Google GenAI MCP Toolbox Configuration
+# This file defines database sources and tools for ADK agents
+
+# Database sources
+sources:
+  cloudsql:
+    kind: cloud-sql-postgres
+    project: celtic-origin-472009-n5
+    region: us-central1
+    instance: testgen-db
+    database: testgen_db
+    user: testgen_user
+    password: testgen_pass
+
+    # SSL configuration for Cloud SQL (if needed)
+    # sslmode: require
+
+  # Redis source for caching and session management
+  # Note: Redis may only be accessible from within GCP VPC
+  # redis-main:
+  #   kind: redis
+  #   host: 10.202.18.147
+  #   port: 6379
+  #   # No password required for this Redis instance
+  #   database: 0
+
+# Available tools for ADK agents
+tools:
+  # Session Management Tools
+  create-session:
+    kind: postgres-sql
+    source: cloudsql
+    description: Create a new agent session for workflow tracking
+    parameters:
+      - name: user_id
+        type: string
+        description: User identifier for the session
+      - name: user_prompt
+        type: string
+        description: Initial user prompt that started the session
+      - name: project_name
+        type: string
+        description: Optional project name for organization
+    statement: |
+      INSERT INTO sessions (session_id, user_id, user_prompt, project_name)
+      VALUES (gen_random_uuid()::text, $1, $2, $3)
+      RETURNING session_id, user_id, user_prompt, project_name, status, created_at;
+
+  get-session:
+    kind: postgres-sql
+    source: cloudsql
+    description: Retrieve session details by session ID
+    parameters:
+      - name: session_id
+        type: string
+        description: Session UUID to retrieve
+    statement: |
+      SELECT session_id, user_id, user_prompt, project_name, status, created_at, updated_at
+      FROM sessions
+      WHERE session_id = $1;
+
+  update-session-status:
+    kind: postgres-sql
+    source: cloudsql
+    description: Update session status (active, completed, archived)
+    parameters:
+      - name: session_id
+        type: string
+        description: Session UUID to update
+      - name: status
+        type: string
+        description: New status (active, completed, archived)
+    statement: |
+      UPDATE sessions
+      SET status = $2, updated_at = CURRENT_TIMESTAMP
+      WHERE session_id = $1
+      RETURNING session_id, status, updated_at;
+
+  # Requirements Management Tools
+  store-requirement:
+    kind: postgres-sql
+    source: cloudsql
+    description: Store a requirement analysis for a session
+    parameters:
+      - name: session_id
+        type: string
+        description: Session UUID
+      - name: content
+        type: string
+        description: Requirement content text
+      - name: requirement_type
+        type: string
+        description: Type of requirement (functional, non-functional, security, etc.)
+      - name: priority
+        type: string
+        description: Priority level (low, medium, high, critical)
+    statement: |
+      INSERT INTO requirements (id, session_id, original_content, requirement_type, priority)
+      VALUES (gen_random_uuid()::text, $1, $2, $3, $4)
+      RETURNING id, session_id, original_content, requirement_type, priority, created_at;
+
+  get-requirements:
+    kind: postgres-sql
+    source: cloudsql
+    description: Get all requirements for a specific session
+    parameters:
+      - name: session_id
+        type: string
+        description: Session UUID
+    statement: |
+      SELECT id, session_id, original_content, requirement_type, priority, created_at
+      FROM requirements
+      WHERE session_id = $1
+      ORDER BY created_at;
+
+  get-requirements-by-type:
+    kind: postgres-sql
+    source: cloudsql
+    description: Get requirements filtered by type
+    parameters:
+      - name: session_id
+        type: string
+        description: Session UUID
+      - name: requirement_type
+        type: string
+        description: Type filter (functional, security, etc.)
+    statement: |
+      SELECT id, session_id, original_content, requirement_type, priority, created_at
+      FROM requirements
+      WHERE session_id = $1 AND requirement_type = $2
+      ORDER BY priority DESC, created_at;
+
+  update-requirement:
+    kind: postgres-sql
+    source: cloudsql
+    description: Update requirement with edited content for a session
+    parameters:
+      - name: session_id
+        type: string
+        description: Session UUID
+      - name: edited_content
+        type: string
+        description: Updated/edited requirement content text
+      - name: priority
+        type: string
+        description: Updated priority level (low, medium, high, critical)
+    statement: |
+      UPDATE requirements
+      SET edited_content = $2, priority = $3, updated_at = CURRENT_TIMESTAMP
+      WHERE session_id = $1
+      RETURNING id, session_id, original_content, edited_content, requirement_type, priority, updated_at;
+
+  # Test Case Management Tools
+  store-test-case:
+    kind: postgres-sql
+    source: cloudsql
+    description: Store a structured test case with basic content
+    parameters:
+      - name: session_id
+        type: string
+        description: Session UUID
+      - name: test_name
+        type: string
+        description: Test case name
+      - name: test_description
+        type: string
+        description: Test case description
+      - name: priority
+        type: string
+        description: Test priority (low, medium, high, critical)
+      - name: test_type
+        type: string
+        description: Test type (functional, security, edge case, negative)
+    statement: |
+      INSERT INTO test_cases (id, session_id, test_name, test_description, priority, test_type)
+      VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5)
+      RETURNING id, session_id, test_name, test_description, priority, test_type, created_at;
+
+  store-test-case-with-data:
+    kind: postgres-sql
+    source: cloudsql
+    description: Store a structured test case with JSON content (for enhanced schema)
+    parameters:
+      - name: session_id
+        type: string
+        description: Session UUID
+      - name: test_name
+        type: string
+        description: Test case name
+      - name: test_description
+        type: string
+        description: Test case description
+      - name: priority
+        type: string
+        description: Test priority (low, medium, high, critical)
+      - name: test_type
+        type: string
+        description: Test type (functional, security, edge case, negative)
+      - name: test_data
+        type: string
+        description: JSON content containing test details
+    statement: |
+      INSERT INTO test_cases (id, session_id, test_name, test_description, priority, test_type, test_data)
+      VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6::jsonb)
+      RETURNING id, session_id, test_name, test_description, priority, test_type, created_at;
+
+  get-test-cases:
+    kind: postgres-sql
+    source: cloudsql
+    description: Get all test cases for a specific session
+    parameters:
+      - name: session_id
+        type: string
+        description: Session UUID
+    statement: |
+      SELECT id, session_id, test_name, test_description, priority, test_type, test_data, created_at
+      FROM test_cases
+      WHERE session_id = $1
+      ORDER BY priority DESC, created_at;
+
+  get-test-cases-by-priority:
+    kind: postgres-sql
+    source: cloudsql
+    description: Get test cases filtered by priority level
+    parameters:
+      - name: session_id
+        type: string
+        description: Session UUID
+      - name: priority
+        type: string
+        description: Priority filter (low, medium, high, critical)
+    statement: |
+      SELECT id, session_id, test_name, test_description, priority, test_type, test_data, created_at
+      FROM test_cases
+      WHERE session_id = $1 AND priority = $2
+      ORDER BY created_at;
+
+  search-test-cases:
+    kind: postgres-sql
+    source: cloudsql
+    description: Search test cases by content using JSONB queries
+    parameters:
+      - name: session_id
+        type: string
+        description: Session UUID
+      - name: search_term
+        type: string
+        description: Search term to find in test content
+    statement: |
+      SELECT id, session_id, test_name, test_description, priority, test_type, test_data, created_at
+      FROM test_cases
+      WHERE session_id = $1
+        AND (
+          test_name ILIKE '%' || $2 || '%'
+          OR test_description ILIKE '%' || $2 || '%'
+          OR test_data::text ILIKE '%' || $2 || '%'
+        )
+      ORDER BY priority DESC, created_at;
+
+  # Complex Queries - Session Context
+  get-session-context:
+    kind: postgres-sql
+    source: cloudsql
+    description: Get complete session with all requirements and test cases
+    parameters:
+      - name: session_id
+        type: string
+        description: Session UUID
+    statement: |
+      SELECT
+        s.session_id,
+        s.user_id,
+        s.user_prompt,
+        s.project_name,
+        s.status,
+        s.created_at as session_created_at,
+        s.updated_at as session_updated_at,
+        COALESCE(
+          json_agg(
+            DISTINCT json_build_object(
+              'requirement_id', r.id,
+              'content', r.original_content,
+              'requirement_type', r.requirement_type,
+              'priority', r.priority,
+              'created_at', r.created_at
+            )
+          ) FILTER (WHERE r.id IS NOT NULL),
+          '[]'::json
+        ) as requirements,
+        COALESCE(
+          json_agg(
+            DISTINCT json_build_object(
+              'test_case_id', tc.id,
+              'test_name', tc.test_name,
+              'test_description', tc.test_description,
+              'priority', tc.priority,
+              'test_type', tc.test_type,
+              'test_data', tc.test_data,
+              'created_at', tc.created_at
+            )
+          ) FILTER (WHERE tc.id IS NOT NULL),
+          '[]'::json
+        ) as test_cases
+      FROM sessions s
+      LEFT JOIN requirements r ON s.session_id = r.session_id
+      LEFT JOIN test_cases tc ON s.session_id = tc.session_id
+      WHERE s.session_id = $1
+      GROUP BY s.session_id, s.user_id, s.user_prompt, s.project_name, s.status, s.created_at, s.updated_at;
+
+  get-session-summary:
+    kind: postgres-sql
+    source: cloudsql
+    description: Get session summary with counts
+    parameters:
+      - name: session_id
+        type: string
+        description: Session UUID
+    statement: |
+      SELECT
+        s.session_id,
+        s.user_id,
+        s.user_prompt,
+        s.project_name,
+        s.status,
+        s.created_at,
+        s.updated_at,
+        COUNT(DISTINCT r.id) as requirement_count,
+        COUNT(DISTINCT tc.id) as test_case_count,
+        COUNT(DISTINCT CASE WHEN tc.priority = 'critical' THEN tc.id END) as critical_tests,
+        COUNT(DISTINCT CASE WHEN tc.priority = 'high' THEN tc.id END) as high_priority_tests
+      FROM sessions s
+      LEFT JOIN requirements r ON s.session_id = r.session_id
+      LEFT JOIN test_cases tc ON s.session_id = tc.session_id
+      WHERE s.session_id = $1
+      GROUP BY s.session_id, s.user_id, s.user_prompt, s.project_name, s.status, s.created_at, s.updated_at;
+
+  # Analytics and Reporting
+  get-user-sessions:
+    kind: postgres-sql
+    source: cloudsql
+    description: Get all sessions for a specific user
+    parameters:
+      - name: user_id
+        type: string
+        description: User identifier
+    statement: |
+      SELECT
+        s.session_id,
+        s.user_prompt,
+        s.project_name,
+        s.status,
+        s.created_at,
+        s.updated_at,
+        COUNT(DISTINCT r.id) as requirement_count,
+        COUNT(DISTINCT tc.id) as test_case_count
+      FROM sessions s
+      LEFT JOIN requirements r ON s.session_id = r.session_id
+      LEFT JOIN test_cases tc ON s.session_id = tc.session_id
+      WHERE s.user_id = $1
+      GROUP BY s.session_id, s.user_prompt, s.project_name, s.status, s.created_at, s.updated_at
+      ORDER BY s.created_at DESC;
+
+  get-active-sessions:
+    kind: postgres-sql
+    source: cloudsql
+    description: Get all active sessions across all users
+    statement: |
+      SELECT
+        s.session_id,
+        s.user_id,
+        s.user_prompt,
+        s.project_name,
+        s.created_at,
+        s.updated_at,
+        COUNT(DISTINCT r.id) as requirement_count,
+        COUNT(DISTINCT tc.id) as test_case_count
+      FROM sessions s
+      LEFT JOIN requirements r ON s.session_id = r.session_id
+      LEFT JOIN test_cases tc ON s.session_id = tc.session_id
+      WHERE s.status = 'active'
+      GROUP BY s.session_id, s.user_id, s.user_prompt, s.project_name, s.created_at, s.updated_at
+      ORDER BY s.updated_at DESC;
+
+  # Redis-based tools for caching and session management
+  # Note: Redis tools are disabled because Redis is not accessible locally
+  # To enable Redis tools when accessible:
+  # 1. Uncomment the redis-main source above
+  # 2. Add Redis tools here with appropriate key patterns
+
+# Tool groupings for different use cases
+toolsets:
+  # Basic session management
+  session-management:
+    - create-session
+    - get-session
+    - update-session-status
+    - get-user-sessions
+    # - cache-session-context  # Enable when Redis is accessible
+    # - get-cached-session
+
+  # Requirements workflow
+  requirements-workflow:
+    - store-requirement
+    - get-requirements
+    - get-requirements-by-type
+    - update-requirement
+
+  # Test case management with caching
+  test-case-management:
+    - store-test-case
+    - store-test-case-with-data
+    - get-test-cases
+    - get-test-cases-by-priority
+    - search-test-cases
+    # - cache-test-results  # Enable when Redis is accessible
+    # - get-test-results
+
+  # Complete agent workflow (most comprehensive)
+  complete-workflow:
+    - create-session
+    - get-session
+    - update-session-status
+    - store-requirement
+    - get-requirements
+    - get-requirements-by-type
+    - update-requirement
+    - store-test-case
+    - store-test-case-with-data
+    - get-test-cases
+    - get-test-cases-by-priority
+    - search-test-cases
+    - get-session-context
+    - get-session-summary
+    # Redis tools (enable when accessible):
+    # - cache-session-context
+    # - get-cached-session
+    # - cache-test-results
+    # - get-test-results
+    # - increment-session-counter
+
+  # Analytics and reporting
+  analytics:
+    - get-session-summary
+    - get-user-sessions
+    - get-active-sessions
+    - get-session-context
+
+  # Performance optimized (with Redis caching) - DISABLED: Redis not accessible locally
+  # performance-optimized:
+  #   - cache-session-context
+  #   - get-cached-session
+  #   - cache-test-results
+  #   - get-test-results
+  #   - increment-session-counter
+  #   - get-session-summary
+
+  # Minimal set for basic testing
+  basic-tools:
+    - create-session
+    - store-requirement
+    - store-test-case
+    - get-session-context
