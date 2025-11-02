@@ -366,6 +366,7 @@ GENERATOR_CARD_URL = f"https://{LOCATION}-aiplatform.googleapis.com/v1beta1/proj
 agent_state: Dict[str, Any] = {}
 
 URL = "https://toolbox-195472357560.us-central1.run.app"
+# URL = "http://localhost:5007"
 auth_token_provider = auth_methods.aget_google_id_token(URL)
 toolbox = ToolboxSyncClient(URL, client_headers={"Authorization": auth_token_provider})
 tools = toolbox.load_toolset()
@@ -416,12 +417,12 @@ def create_remote_agents():
 
 async def execute_workflow(status: str, user_input: str, session_id: str) -> Dict[str, Any]:
     """
-    Execute workflow based on status with clear delegation rules.
+    Execute enhanced HITL workflow with comprehensive human feedback capabilities.
 
     Args:
-        status: Workflow status - 'start', 'approved', 'edited', or 'rejected'
+        status: Workflow status - 'start', 'approved', 'edited', 'rejected', 'refine', 'review', 'enhance'
         user_input: User input text for the workflow
-        session_id: Required session ID for tracking workflow state (no longer optional)
+        session_id: Required session ID for tracking workflow state
 
     Returns:
         Workflow result with status, stage, delegate_to, and relevant data
@@ -430,88 +431,343 @@ async def execute_workflow(status: str, user_input: str, session_id: str) -> Dic
 
     status = status.strip().lower()
     user_input = user_input.strip()
-
-    # Store session_id as a variable for consistent usage
     current_session_id = session_id.strip()
 
     if current_session_id not in agent_state:
-        agent_state[current_session_id] = {}
+        agent_state[current_session_id] = {
+            "iteration_count": 0,
+            "feedback_history": [],
+            "quality_scores": {},
+            "enhancement_requests": [],
+            "approval_chain": []
+        }
 
     session_data = agent_state[current_session_id]
 
     if status == "start":
-        # STEP 1: Delegate to requirement_analyzer, then store response in requirements table (original_content)
+        # STEP 1: Initial analysis with HITL checkpoint
         session_data["analyzer_input"] = user_input
         session_data["current_status"] = "analyzing"
+        session_data["iteration_count"] = 1
         return {
             "status": "delegating",
             "stage": "analyzing_requirements",
             "delegate_to": "requirement_analyzer",
             "input": user_input,
             "session_id": current_session_id,
-            "next_action": "store_original_requirements_to_db"
+            "next_action": "store_original_requirements_to_db",
+            "hitl_checkpoint": "analysis_review",
+            "available_actions": ["approved", "edited", "rejected", "refine", "enhance"]
         }
 
-    elif status == "edited":
-        # STEP 2: Update requirements table (edited_content) then delegate to test_case_generator
-        session_data["edited_input"] = user_input
-        session_data["current_status"] = "editing"
+    elif status == "refine":
+        # HITL: Human requests refinement with specific feedback
+        session_data["iteration_count"] += 1
+        session_data["feedback_history"].append({
+            "iteration": session_data["iteration_count"],
+            "feedback_type": "refinement",
+            "human_input": user_input,
+            "timestamp": str(uuid.uuid4())[:8]  # Simple timestamp
+        })
+
+        # Re-analyze with human feedback incorporated
+        enhanced_prompt = f"Original analysis needs refinement. Human feedback: {user_input}. Please re-analyze considering this feedback."
         return {
             "status": "delegating",
-            "stage": "updating_edited_requirements",
-            "delegate_to": "test_case_generator",
-            "input": user_input,  # Pass the edited content directly
+            "stage": "refining_analysis",
+            "delegate_to": "requirement_analyzer",
+            "input": enhanced_prompt,
             "session_id": current_session_id,
+            "iteration": session_data["iteration_count"],
+            "feedback_incorporated": True,
+            "next_action": "store_refined_requirements_to_db"
+        }
+
+    elif status == "enhance":
+        # HITL: Human requests enhancement with additional context
+        session_data["enhancement_requests"].append({
+            "enhancement_type": "context_addition",
+            "details": user_input,
+            "iteration": session_data["iteration_count"]
+        })
+
+        # Get current analysis and enhance it
+        current_analysis = session_data.get("last_analysis", "")
+        enhanced_input = f"Current analysis: {current_analysis}\n\nAdditional context from human: {user_input}\n\nPlease enhance the analysis with this new information."
+
+        return {
+            "status": "delegating",
+            "stage": "enhancing_analysis",
+            "delegate_to": "requirement_analyzer",
+            "input": enhanced_input,
+            "session_id": current_session_id,
+            "enhancement_applied": True,
+            "next_action": "store_enhanced_requirements_to_db"
+        }
+
+    elif status == "review":
+        # HITL: Human provides quality review and scoring
+        try:
+            # Parse review format: "review; score:8; feedback:needs more detail"
+            parts = user_input.split(';')
+            score = None
+            feedback = ""
+
+            for part in parts:
+                if part.strip().startswith("score:"):
+                    score = int(part.split(":")[1].strip())
+                elif part.strip().startswith("feedback:"):
+                    feedback = part.split(":", 1)[1].strip()
+
+            session_data["quality_scores"][f"iteration_{session_data['iteration_count']}"] = {
+                "score": score,
+                "feedback": feedback,
+                "review_timestamp": str(uuid.uuid4())[:8]
+            }
+
+            # If score is low (< 7), suggest improvements
+            if score and score < 7:
+                return {
+                    "status": "needs_improvement",
+                    "stage": "quality_review_failed",
+                    "score": score,
+                    "feedback": feedback,
+                    "session_id": current_session_id,
+                    "suggested_actions": ["refine", "enhance", "rejected"],
+                    "improvement_needed": True
+                }
+            else:
+                return {
+                    "status": "quality_approved",
+                    "stage": "quality_review_passed",
+                    "score": score,
+                    "feedback": feedback,
+                    "session_id": current_session_id,
+                    "available_actions": ["approved", "generate_tests"]
+                }
+
+        except Exception as e:
+            return {
+                "status": "review_error",
+                "error": f"Invalid review format. Use: 'score:X; feedback:your feedback'",
+                "session_id": current_session_id
+            }
+
+    elif status == "edited":
+        # STEP 2: Human edited content - track changes and delegate
+        session_data["edited_input"] = user_input
+        session_data["current_status"] = "editing"
+        session_data["feedback_history"].append({
+            "iteration": session_data["iteration_count"],
+            "feedback_type": "direct_edit",
+            "edited_content": user_input,
+            "timestamp": str(uuid.uuid4())[:8]
+        })
+
+        return {
+            "status": "delegating",
+            "stage": "processing_edited_requirements",
+            "delegate_to": "test_case_generator",
+            "input": user_input,
+            "session_id": current_session_id,
+            "human_edited": True,
             "next_action": "store_edited_requirements_to_db_then_generate"
         }
 
     elif status == "approved":
-        # STEP 3: Retrieve stored analysis and delegate to test_case_generator
+        # STEP 3: Human approval - proceed to test generation
         stored_analysis = session_data.get("last_analysis", "")
         session_data["current_status"] = "approved"
+        session_data["approval_chain"].append({
+            "approver": "human",
+            "timestamp": str(uuid.uuid4())[:8],
+            "iteration": session_data["iteration_count"]
+        })
+
         return {
             "status": "delegating",
             "stage": "generating_test_cases",
             "delegate_to": "test_case_generator",
             "input": stored_analysis,
             "session_id": current_session_id,
+            "human_approved": True,
             "next_action": "store_test_cases_to_db"
         }
 
     elif status == "rejected":
-        # STEP 4: Acknowledge rejection and offer restart
+        # STEP 4: Human rejection with optional feedback
         session_data["current_status"] = "rejected"
+        session_data["feedback_history"].append({
+            "iteration": session_data["iteration_count"],
+            "feedback_type": "rejection",
+            "rejection_reason": user_input if user_input else "No reason provided",
+            "timestamp": str(uuid.uuid4())[:8]
+        })
+
         return {
             "status": "rejected",
             "stage": "workflow_rejected",
             "session_id": current_session_id,
-            "message": "Requirements analysis rejected. You can restart with 'start' status."
+            "rejection_reason": user_input,
+            "restart_options": ["start", "refine"],
+            "feedback_available": True
         }
 
     else:
         return {
             "status": "failed",
             "reason": "invalid_status",
-            "valid_statuses": ["start", "approved", "edited", "rejected"],
-            "session_id": current_session_id
+            "valid_statuses": ["start", "approved", "edited", "rejected", "refine", "review", "enhance"],
+            "session_id": current_session_id,
+            "hitl_help": "Use 'refine' for feedback-based improvements, 'enhance' to add context, 'review' to score quality"
         }
 
-# Create FunctionTool from the execute_workflow function
+async def get_session_feedback_history(session_id: str) -> Dict[str, Any]:
+    """
+    Get comprehensive feedback history for a session to enable HITL analysis.
+
+    Args:
+        session_id: Session ID to retrieve history for
+
+    Returns:
+        Dictionary containing complete feedback history and analytics
+    """
+    global agent_state
+
+    if session_id not in agent_state:
+        return {
+            "session_id": session_id,
+            "status": "not_found",
+            "message": "No session data found"
+        }
+
+    session_data = agent_state[session_id]
+
+    return {
+        "session_id": session_id,
+        "status": "found",
+        "iteration_count": session_data.get("iteration_count", 0),
+        "feedback_history": session_data.get("feedback_history", []),
+        "quality_scores": session_data.get("quality_scores", {}),
+        "enhancement_requests": session_data.get("enhancement_requests", []),
+        "approval_chain": session_data.get("approval_chain", []),
+        "current_status": session_data.get("current_status", "unknown"),
+        "analytics": {
+            "total_feedback_items": len(session_data.get("feedback_history", [])),
+            "average_quality_score": _calculate_average_score(session_data.get("quality_scores", {})),
+            "enhancement_count": len(session_data.get("enhancement_requests", [])),
+            "approval_count": len(session_data.get("approval_chain", []))
+        }
+    }
+
+def _calculate_average_score(quality_scores: Dict[str, Any]) -> float:
+    """Calculate average quality score from session data."""
+    scores = [item.get("score", 0) for item in quality_scores.values() if item.get("score")]
+    return sum(scores) / len(scores) if scores else 0.0
+
+async def suggest_improvements(session_id: str, current_output: str) -> Dict[str, Any]:
+    """
+    AI-powered suggestion system for HITL improvements based on feedback history.
+
+    Args:
+        session_id: Session ID to analyze
+        current_output: Current agent output to improve
+
+    Returns:
+        Improvement suggestions and recommendations
+    """
+    global agent_state
+
+    if session_id not in agent_state:
+        return {"error": "Session not found"}
+
+    session_data = agent_state[session_id]
+    feedback_history = session_data.get("feedback_history", [])
+    quality_scores = session_data.get("quality_scores", {})
+
+    # Analyze patterns in feedback
+    common_issues = []
+    improvement_areas = []
+
+    for feedback in feedback_history:
+        if feedback.get("feedback_type") == "refinement":
+            common_issues.append(feedback.get("human_input", ""))
+        elif feedback.get("feedback_type") == "rejection":
+            improvement_areas.append(feedback.get("rejection_reason", ""))
+
+    # Analyze quality scores for trends
+    low_score_feedback = []
+    for score_data in quality_scores.values():
+        if score_data.get("score", 10) < 7:
+            low_score_feedback.append(score_data.get("feedback", ""))
+
+    return {
+        "session_id": session_id,
+        "suggestions": {
+            "common_issues_identified": common_issues,
+            "improvement_areas": improvement_areas,
+            "low_score_patterns": low_score_feedback,
+            "recommended_actions": _generate_action_recommendations(feedback_history, quality_scores),
+            "quality_trend": _analyze_quality_trend(quality_scores)
+        },
+        "hitl_insights": {
+            "feedback_frequency": len(feedback_history),
+            "refinement_cycles": len([f for f in feedback_history if f.get("feedback_type") == "refinement"]),
+            "human_engagement_level": "high" if len(feedback_history) > 3 else "medium" if len(feedback_history) > 1 else "low"
+        }
+    }
+
+def _generate_action_recommendations(feedback_history: list, quality_scores: dict) -> list:
+    """Generate action recommendations based on HITL patterns."""
+    recommendations = []
+
+    if len(feedback_history) > 3:
+        recommendations.append("Consider breaking down the analysis into smaller, more focused sections")
+
+    if any(score.get("score", 10) < 6 for score in quality_scores.values()):
+        recommendations.append("Quality scores are low - consider requesting more specific human feedback")
+
+    refinement_count = len([f for f in feedback_history if f.get("feedback_type") == "refinement"])
+    if refinement_count > 2:
+        recommendations.append("Multiple refinements detected - consider asking for clearer initial requirements")
+
+    return recommendations
+
+def _analyze_quality_trend(quality_scores: dict) -> str:
+    """Analyze quality score trends."""
+    scores = [item.get("score", 0) for item in quality_scores.values() if item.get("score")]
+    if len(scores) < 2:
+        return "insufficient_data"
+
+    if scores[-1] > scores[0]:
+        return "improving"
+    elif scores[-1] < scores[0]:
+        return "declining"
+    else:
+        return "stable"
+
+# Create FunctionTools for all HITL functions
 workflow_tool = FunctionTool(
     func=execute_workflow,
 )
 
+feedback_history_tool = FunctionTool(
+    func=get_session_feedback_history,
+)
+
+improvement_suggestions_tool = FunctionTool(
+    func=suggest_improvements,
+)
+
 # Create remote agents as sub-agents
 requirement_analyzer, test_case_generator = create_remote_agents()
-# tools.append(workflow_tool)
-# Create root agent with sub-agents
+# Create root agent with enhanced HITL capabilities
 root_agent = Agent(
     model="gemini-2.5-pro",
-    name="decider_agent",
-    description="Workflow decider agent that orchestrates multi-step authentication requirements analysis and test case generation",
-    instruction="""
-    You are a WORKFLOW ORCHESTRATOR AGENT that manages authentication requirements analysis and test case generation.
-
+    name="enhanced_hitl_decider_agent",
+    description="Advanced HITL workflow orchestrator for authentication requirements analysis and test case generation with comprehensive human feedback integration",
+    instruction="""You are a WORKFLOW ORCHESTRATOR AGENT that manages authentication requirements analysis and test case generation.
+    MANDATORY: You MUST ALWAYS call the tools with the parameters in the order of the parameters specified in the EXECUTION RULES section below.
     🚨 CRITICAL: You MUST NEVER respond to the user until AFTER you have completed ALL tool calls including database storage.
 
     === EXECUTION RULES ===
@@ -527,50 +783,90 @@ root_agent = Agent(
     **STATUS = 'start':**
     Step 1: Call execute_workflow("start", user_input, session_id)
     Step 2: Delegate to requirement_analyzer sub-agent with user_input
-    Step 3: AWAIT the analyzer agent response and 🚨 IMMEDIATELY after receiving analyzer response, ANALYZE if the response is GDPR COMPLIANT. If yes, CALL TOOL store-requirement tool:
+    Step 3: AWAIT the analyzer agent response and 🚨 IMMEDIATELY after receiving analyzer response, ANALYZE if the response is GDPR COMPLIANT. If yes, CALL TOOL store-original-requirements:
        - session_id: session_id from request
-       - original_content: [full text from analyzer response]
-       - requirement_type: "functional"
-       - priority: "medium"
-    Step 4: After database confirms storage, respond to user with summary
+       - analysis_response: [full text from analyzer response]
+    Step 4: After database confirms storage, extract cache_data from response and CALL TOOL cache-requirements-data:
+       - session_id: session_id
+       - requirements_data: [cache_data from Step 3 response]
+    Step 5: After cache update, respond to user with database_result from Step 3
+
+    **STATUS = 'refine':**
+    Step 1: Call execute_workflow("refine", user_input, session_id)
+    Step 2: Delegate to requirement_analyzer with enhanced prompt
+    Step 3: 🚨 IMMEDIATELY after receiving analyzer response, CALL TOOL hitl-refine-analysis-workflow:
+       - session_id: session_id from request
+       - refined_analysis: [analyzer response]
+       - human_feedback: user_input
+       - iteration_count: [from execute_workflow response]
+    Step 4: After database confirms storage, extract cache_data from response and CALL TOOL cache-requirements-data:
+       - session_id: session_id
+       - requirements_data: [cache_data from Step 3 response]
+    Step 5: After cache update, respond to user with database_result from Step 3
+
+    **STATUS = 'enhance':**
+    Step 1: Call execute_workflow("enhance", user_input, session_id)
+    Step 2: Delegate to requirement_analyzer with enhanced prompt
+    Step 3: 🚨 IMMEDIATELY after receiving analyzer response, CALL TOOL hitl-enhance-analysis-workflow:
+       - session_id: session_id from request
+       - enhanced_analysis: [analyzer response]
+       - enhancement_context: user_input
+    Step 4: After database confirms storage, extract cache_data from response and CALL TOOL cache-requirements-data:
+       - session_id: session_id
+       - requirements_data: [cache_data from Step 3 response]
+    Step 5: After cache update, respond to user with database_result from Step 3
 
     **STATUS = 'edited':**
     Step 1: Call execute_workflow("edited", user_input, session_id)
-    Step 2: Call update-requirement tool with edited content:
+    Step 2: Call hitl-process-edited-requirements tool with edited content:
        - session_id: session_id from request
-       - content: "EDITED: " + user_input
-       - requirement_type: "functional"
-       - priority: "high"
+       - edited_content: user_input
+    Step 3: After database confirms storage, extract cache_data from response and CALL TOOL cache-requirements-data:
+       - session_id: session_id
+       - requirements_data: [cache_data from Step 2 response]
+    Step 4: After cache update, respond to user with database_result from Step 2
 
     **STATUS = 'approved':**
     Step 1: Call execute_workflow("approved", "", session_id)
-    Step 2: Call get-requirements tool with session_id
-    Step 3: Delegate to test_case_generator with retrieved requirements with the edited_analysis field value.
-    Step 4: 🚨 AWAIT the generator agent response and IMMEDIATELY after receiving generator response, CHECK for GDPR COMPLIANCE and CALL TOOL store-test-case for each test case:
+    Step 2: Call hitl-approve-and-generate-tests tool with session_id
+    Step 3: CHECK if requirements are available from Step 2 response:
+       - If requirements_available = true: Delegate to test_case_generator with combined_requirements
+       - If requirements_available = false: Respond with error about missing requirements
+    Step 4: 🚨 ONLY if requirements were available and generator responded, CALL TOOL parse-and-store-test-cases(session_id, structured_test_cases, test_types_requested) in the following order of parameters:
        - session_id: session_id from request
-       - test_case_id: unique ID for each test case
-       - content: [test case content from generator]
-    Step 5: After all test cases stored, respond to user
+       - structured_test_cases: [generator response]
+       - test_types_requested: ["functional", "security","performance", "edge_case", "regression", "integration", "negative"]
+    Step 5: After database confirms storage, extract cache_data from response and CALL TOOL cache-test-cases-data:
+       - session_id: session_id
+       - test_cases_data: [cache_data from Step 4 response]
+    Step 6: After cache update, respond to user with database_result from Step 4
 
     **STATUS = 'rejected':**
-    Step 1: Call execute_workflow("rejected", "", session_id)
-    Step 2: Respond with rejection acknowledgment
+    Step 1: Call execute_workflow("rejected", user_input, session_id)
+    Step 2: Call hitl-reject-workflow tool:
+       - session_id: session_id from request
+       - rejection_reason: user_input
+    Step 3: After database confirms, respond with rejection acknowledgment
 
     🚨 CRITICAL BEHAVIOR RULES 🚨
 
-    1. **DO NOT say anything to the user until database storage is complete**
+    1. **DO NOT say anything to the user until database storage AND cache update are complete**
     2. **Sub-agent responses are intermediate data - NOT final responses**
-    3. **Every sub-agent call must be followed by a database tool call**
-    4. **The database tool call happens AUTOMATICALLY - you don't wait for user permission**
+    3. **Every sub-agent call must be followed by: database tool call → cache tool call → user response**
+    4. **The database and cache tool calls happen AUTOMATICALLY - you don't wait for user permission**
+    5. **Always return the database_result from the database tool response, not your own summary**
+    6. **Cache operations ensure data consistency between database and Redis cache**
+    7. **Extract cache_data from database tool response JSON and pass as requirements_data/test_cases_data to cache tools**
+    8. **Database tool responses contain: database_result (for user), cache_data (for caching), next_action (instruction)**
     5. **Your thinking process:**
        - "Got sub-agent response" → "Now I must call database tool" → "Database confirmed" → "Now I can respond to user"
 
     🔒 CORRECT BEHAVIOR EXAMPLE:
-    - User: "start session_123 analyze login flow"
+    - User: "start; Analyze OAuth flow; session_123"
     - You: [Call execute_workflow]
     - You: [Call requirement_analyzer sub-agent]
     - You: [Receive analyzer response: "Authentication requires OAuth 2.0..."]
-    - You: [IMMEDIATELY call store-requirement with that response]
+    - You: [IMMEDIATELY call hitl-store-original-requirements with that response]
     - You: [Get database confirmation]
     - You: "I've analyzed and stored your requirements. The analysis shows authentication requires OAuth 2.0..."
 
@@ -582,7 +878,10 @@ root_agent = Agent(
     You are a DATA PROCESSOR, not a messenger. Process first, report after.
 
     Remember: execute_workflow → sub-agent → database tool → user response
-    NEVER skip the database tool step!""",
+    NEVER skip the database tool step!
+
+    Enhanced HITL statuses: start, refine, enhance, review, edited, approved, rejected
+    """,
     sub_agents=[],
-    tools=[workflow_tool, *tools, requirement_analyzer, test_case_generator],
+    tools=[workflow_tool, feedback_history_tool, improvement_suggestions_tool, *tools, requirement_analyzer, test_case_generator],
 )

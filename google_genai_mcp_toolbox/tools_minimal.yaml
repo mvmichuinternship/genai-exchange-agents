@@ -1,0 +1,142 @@
+# Google GenAI MCP Toolbox Configuration - MINIMAL LOAD FOR DECIDER AGENT
+# This file defines only the essential database sources and tools used by the decider agent
+# Optimized for performance by loading only required tools
+
+# Database sources
+sources:
+  cloudsql:
+    kind: cloud-sql-postgres
+    project: celtic-origin-472009-n5
+    region: us-central1
+    instance: testgen-db
+    database: testgen_db
+    user: testgen_user
+    password: testgen_pass
+
+# Essential tools for HITL Enhanced Decider Agent
+tools:
+  parse-and-store-test-cases:
+    kind: postgres-sql
+    source: cloudsql
+    description: Parse structured test_cases JSON (handles both JSON and string-wrapped JSON) and insert into test_cases table
+    parameters:
+      - name: session_id
+        type: string
+        description: Session UUID
+      - name: structured_test_cases
+        type: string
+        description: "JSON string or quoted JSON containing test_suite.test_cases array"
+      - name: test_types_requested
+        type: string
+        description: "Optional filter for test types (functional, security, etc)"
+
+    statement: |
+      WITH parsed_json AS (
+        SELECT
+          CASE
+            WHEN $2::text ~ '^".*"$' THEN
+              (SUBSTRING($2::text, 2, LENGTH($2::text) - 2)::jsonb)
+            WHEN $2::text ~ '^\{' THEN
+              ($2::jsonb)
+            ELSE
+              ('{"test_suite":{"test_cases":[]}}'::jsonb)
+          END ->'test_suite'->'test_cases' AS test_cases_array
+      ),
+      unpacked_tests AS (
+        SELECT
+          jsonb_array_elements(test_cases_array) AS test_case
+        FROM parsed_json
+      ),
+      final_records AS (
+        SELECT
+          gen_random_uuid()::text AS id,
+          $1::varchar AS session_id,
+          COALESCE(test_case->>'test_id', 'Unknown')::varchar AS test_name,
+          COALESCE(test_case->>'summary', '')::varchar AS test_description,
+          COALESCE(test_case->'test_steps', '[]'::jsonb) AS test_steps,
+          COALESCE(test_case->>'expected_result', '')::text AS expected_results,
+          LOWER(COALESCE(test_case->>'type', 'functional'))::varchar AS test_type,
+          LOWER(COALESCE(test_case->>'priority', 'medium'))::varchar AS priority,
+          'active'::varchar AS status,
+          COALESCE(test_case->'test_data', '{}'::jsonb) AS test_data,
+          CASE
+            WHEN jsonb_typeof(test_case->'preconditions') = 'array' THEN
+              array_to_string(ARRAY(SELECT jsonb_array_elements_text(test_case->'preconditions')), '; ')
+            ELSE
+              COALESCE(test_case->>'preconditions', '')
+          END::text AS preconditions,
+          ''::text AS postconditions,
+          30 AS estimated_duration,
+          true AS automation_feasible,
+          '[]'::jsonb AS tags,
+          COALESCE(test_case->>'summary', '')::text AS summary,
+          COALESCE(test_case->>'requirement_traceability', '')::text AS requirement_traceability
+        FROM unpacked_tests
+        WHERE
+          CASE
+            WHEN $3::text IS NULL OR $3::text = '' THEN true
+            ELSE LOWER(COALESCE(test_case->>'type', 'functional')) = ANY(STRING_TO_ARRAY(LOWER($3::text), ','))
+          END
+      ),
+      inserted_rows AS (
+        INSERT INTO test_cases (
+          id,
+          session_id,
+          test_name,
+          test_description,
+          test_steps,
+          expected_results,
+          test_type,
+          priority,
+          status,
+          test_data,
+          preconditions,
+          postconditions,
+          estimated_duration,
+          automation_feasible,
+          tags,
+          summary,
+          requirement_traceability
+        )
+        SELECT
+          id,
+          session_id,
+          test_name,
+          test_description,
+          test_steps,
+          expected_results,
+          test_type,
+          priority,
+          status,
+          test_data,
+          preconditions,
+          postconditions,
+          estimated_duration,
+          automation_feasible,
+          tags,
+          summary,
+          requirement_traceability
+        FROM final_records
+        RETURNING id, test_name, test_type, priority, summary
+      )
+      SELECT
+        json_build_object(
+          'status', 'success',
+          'session_id', $1,
+          'test_cases_inserted', (SELECT COUNT(*) FROM inserted_rows),
+          'test_cases', (
+            SELECT json_agg(
+              json_build_object(
+                'id', id,
+                'test_name', test_name,
+                'test_type', test_type,
+                'priority', priority,
+                'summary', summary
+              )
+            )
+            FROM inserted_rows
+          )
+        )::text AS result;
+
+
+
