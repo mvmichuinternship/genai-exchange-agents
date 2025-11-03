@@ -1,347 +1,3 @@
-# from google.adk.agents import Agent
-
-# from a2a.client import ClientFactory, ClientConfig
-# from a2a.types import TransportProtocol
-# from google.adk.tools import FunctionTool
-# import httpx
-# from google.auth import default
-# from google.auth.transport.requests import Request
-# from google.adk.tools import ToolContext
-# from google.adk.agents.remote_a2a_agent import RemoteA2aAgent
-# from typing import Optional, Dict, Any
-# import asyncio
-# import json
-# import uuid
-
-
-# PROJECT_ID = "195472357560"
-# LOCATION = "us-central1"
-# ANALYZER_RESOURCE_ID = "5155975060502085632"
-# GENERATOR_RESOURCE_ID = "5036488932888412160"
-
-# ANALYZER_CARD_URL = f"https://{LOCATION}-aiplatform.googleapis.com/v1beta1/projects/{PROJECT_ID}/locations/{LOCATION}/reasoningEngines/{ANALYZER_RESOURCE_ID}/a2a/v1/card"
-# GENERATOR_CARD_URL = f"https://{LOCATION}-aiplatform.googleapis.com/v1beta1/projects/{PROJECT_ID}/locations/{LOCATION}/reasoningEngines/{GENERATOR_RESOURCE_ID}/a2a/v1/card"
-
-# agent_state: Dict[str, Any] = {}
-
-# def create_client_factory():
-#     credentials, _ = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-#     credentials.refresh(Request())
-#     httpx_client = httpx.Client(
-#         headers={
-#             "Authorization": f"Bearer {credentials.token}",
-#             "Content-Type": "application/json",
-#         },
-#         timeout=60.0,
-#     )
-#     return ClientFactory(
-#         ClientConfig(
-#             supported_transports=[TransportProtocol.http_json],
-#             use_client_preference=True,
-#             httpx_client=httpx_client,
-#         ),
-#     )
-
-# analyzer_agent = None
-# generator_agent = None
-
-# def get_remote_agents():
-#     global analyzer_agent, generator_agent
-
-#     if analyzer_agent is None:
-#         analyzer_agent = RemoteA2aAgent(
-#             name="requirement_analyzer",
-#             description="Auth requirements analyzer",
-#             agent_card=ANALYZER_CARD_URL,
-#             a2a_client_factory=create_client_factory(),
-#         )
-
-#     if generator_agent is None:
-#         generator_agent = RemoteA2aAgent(
-#             name="test_case_generator",
-#             description="Test case generator",
-#             agent_card=GENERATOR_CARD_URL,
-#             a2a_client_factory=create_client_factory(),
-#         )
-
-#     return analyzer_agent, generator_agent
-
-# async def execute_workflow(status: str, user_input: str, session_id: Optional[str] = None) -> Dict[str, Any]:
-#     """
-#     Execute workflow based on status.
-
-#     Args:
-#         status: Workflow status - 'start', 'approved', 'edited', or 'rejected'
-#         user_input: User input text for the workflow
-#         session_id: Optional session ID for tracking workflow state
-
-#     Returns:
-#         Workflow result with status, stage, and relevant data
-#     """
-#     global agent_state
-
-#     analyzer, generator = get_remote_agents()
-
-#     status = status.strip().lower()
-#     user_input = user_input.strip()
-
-#     if session_id is None:
-#         session_id = str(uuid.uuid4())
-
-#     if session_id not in agent_state:
-#         agent_state[session_id] = {}
-
-#     session_data = agent_state[session_id]
-
-#     if status == "start":
-#         analysis_response = await analyzer.send_message(user_input, session_id=session_id)
-#         analysis_text = (
-#             analysis_response.message.parts[0].text
-#             if analysis_response.message.parts
-#             else "<no analysis>"
-#         )
-#         session_data["last_analysis"] = analysis_text
-#         return {
-#             "status": "pending",
-#             "stage": "awaiting_human_review",
-#             "analysis": analysis_text,
-#             "session_id": session_id
-#         }
-
-#     elif status in {"approved", "edited"}:
-#         input_text = user_input if status == "edited" else session_data.get("last_analysis", "")
-#         generated_response = await generator.send_message(input_text, session_id=session_id)
-#         test_cases_text = (
-#             generated_response.message.parts[0].text
-#             if generated_response.message.parts
-#             else "<no test cases>"
-#         )
-#         return {
-#             "status": "done",
-#             "stage": "test_cases_generated",
-#             "test_cases": test_cases_text,
-#             "session_id": session_id
-#         }
-
-#     elif status == "rejected":
-#         return {
-#             "status": "failed",
-#             "stage": "rejected",
-#             "session_id": session_id
-#         }
-
-#     else:
-#         return {
-#             "status": "failed",
-#             "reason": "invalid_status",
-#             "session_id": session_id
-#         }
-
-# # Create FunctionTool from the execute_workflow function
-# workflow_tool = FunctionTool(
-#     func=execute_workflow,
-# )
-
-# root_agent = Agent(
-#     model="gemini-2.0-flash-exp",
-#     name="decider_agent",
-#     description="Workflow decider agent",
-#     instruction="""You are a workflow orchestrator. When you receive a message in the format "status; user_input",
-#     you MUST call the execute_workflow tool with the parsed status and user_input parameters.
-
-#     Always extract the status and user_input from the message and call execute_workflow.
-#     Return the exact response from execute_workflow to the user.""",
-#     tools=[workflow_tool],
-# )
-
-
-
-# from google.adk.agents import Agent
-# from a2a.client import ClientFactory, ClientConfig
-# from a2a.types import TransportProtocol
-# from google.adk.tools import FunctionTool
-# import httpx
-# from google.auth import default
-# from google.auth.transport.requests import Request
-# from google.adk.agents.remote_a2a_agent import RemoteA2aAgent
-# from typing import Optional, Dict, Any
-# import uuid
-
-
-# PROJECT_ID = "195472357560"
-# LOCATION = "us-central1"
-# ANALYZER_RESOURCE_ID = "5155975060502085632"
-# GENERATOR_RESOURCE_ID = "5036488932888412160"
-
-# ANALYZER_CARD_URL = f"https://{LOCATION}-aiplatform.googleapis.com/v1beta1/projects/{PROJECT_ID}/locations/{LOCATION}/reasoningEngines/{ANALYZER_RESOURCE_ID}/a2a/v1/card"
-# GENERATOR_CARD_URL = f"https://{LOCATION}-aiplatform.googleapis.com/v1beta1/projects/{PROJECT_ID}/locations/{LOCATION}/reasoningEngines/{GENERATOR_RESOURCE_ID}/a2a/v1/card"
-
-# agent_state: Dict[str, Any] = {}
-
-# def create_client_factory():
-#     credentials, _ = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-#     credentials.refresh(Request())
-#     httpx_client = httpx.Client(
-#         headers={
-#             "Authorization": f"Bearer {credentials.token}",
-#             "Content-Type": "application/json",
-#         },
-#         timeout=60.0,
-#     )
-#     return ClientFactory(
-#         ClientConfig(
-#             supported_transports=[TransportProtocol.http_json],
-#             use_client_preference=True,
-#             httpx_client=httpx_client,
-#         ),
-#     )
-
-# analyzer_agent = None
-# generator_agent = None
-
-# def get_remote_agents():
-#     global analyzer_agent, generator_agent
-
-#     if analyzer_agent is None:
-#         analyzer_agent = RemoteA2aAgent(
-#             name="requirement_analyzer",
-#             description="Auth requirements analyzer",
-#             agent_card=ANALYZER_CARD_URL,
-#             a2a_client_factory=create_client_factory(),
-#         )
-
-#     if generator_agent is None:
-#         generator_agent = RemoteA2aAgent(
-#             name="test_case_generator",
-#             description="Test case generator",
-#             agent_card=GENERATOR_CARD_URL,
-#             a2a_client_factory=create_client_factory(),
-#         )
-
-#     return analyzer_agent, generator_agent
-
-# async def execute_workflow(status: str, user_input: str, session_id: Optional[str] = None) -> Dict[str, Any]:
-#     """
-#     Execute workflow based on status.
-
-#     Args:
-#         status: Workflow status - 'start', 'approved', 'edited', or 'rejected'
-#         user_input: User input text for the workflow
-#         session_id: Optional session ID for tracking workflow state
-
-#     Returns:
-#         Workflow result with status, stage, and relevant data
-#     """
-#     global agent_state
-
-#     analyzer, generator = get_remote_agents()
-
-#     status = status.strip().lower()
-#     user_input = user_input.strip()
-
-#     if session_id is None:
-#         session_id = str(uuid.uuid4())
-
-#     if session_id not in agent_state:
-#         agent_state[session_id] = {}
-
-#     session_data = agent_state[session_id]
-
-#     if status == "start":
-#         # Call analyzer agent using run_async
-#         analysis_response = await analyzer.run_async(
-#             user_input=user_input,
-#             session_id=session_id
-#         )
-
-#         # Extract text from response
-#         analysis_text = ""
-#         if hasattr(analysis_response, 'output') and analysis_response.output:
-#             analysis_text = str(analysis_response.output)
-#         elif hasattr(analysis_response, 'message') and analysis_response.message:
-#             if hasattr(analysis_response.message, 'parts') and analysis_response.message.parts:
-#                 analysis_text = analysis_response.message.parts[0].text
-#         else:
-#             analysis_text = str(analysis_response)
-
-#         session_data["last_analysis"] = analysis_text
-#         return {
-#             "status": "pending",
-#             "stage": "awaiting_human_review",
-#             "analysis": analysis_text,
-#             "session_id": session_id
-#         }
-
-#     elif status in {"approved", "edited"}:
-#         input_text = user_input if status == "edited" else session_data.get("last_analysis", "")
-
-#         # Call generator agent using run_async
-#         generated_response = await generator.run_async(
-#             user_input=input_text,
-#             session_id=session_id
-#         )
-
-#         # Extract text from response
-#         test_cases_text = ""
-#         if hasattr(generated_response, 'output') and generated_response.output:
-#             test_cases_text = str(generated_response.output)
-#         elif hasattr(generated_response, 'message') and generated_response.message:
-#             if hasattr(generated_response.message, 'parts') and generated_response.message.parts:
-#                 test_cases_text = generated_response.message.parts[0].text
-#         else:
-#             test_cases_text = str(generated_response)
-
-#         return {
-#             "status": "done",
-#             "stage": "test_cases_generated",
-#             "test_cases": test_cases_text,
-#             "session_id": session_id
-#         }
-
-#     elif status == "rejected":
-#         return {
-#             "status": "failed",
-#             "stage": "rejected",
-#             "session_id": session_id
-#         }
-
-#     else:
-#         return {
-#             "status": "failed",
-#             "reason": "invalid_status",
-#             "session_id": session_id
-#         }
-
-# # Create FunctionTool from the execute_workflow function
-# workflow_tool = FunctionTool(
-#     func=execute_workflow,
-# )
-
-# root_agent = Agent(
-#     model="gemini-2.0-flash-exp",
-#     name="decider_agent",
-#     description="Workflow decider agent that orchestrates multi-step authentication requirements analysis and test case generation",
-#     instruction="""You are a workflow orchestrator that ALWAYS uses the execute_workflow tool.
-
-# CRITICAL: For EVERY user message, you MUST call execute_workflow with parsed parameters.
-
-# Input parsing rules:
-# - Format: "status; user_input" or "status; user_input; session_id"
-# - Extract status (start/approved/edited/rejected)
-# - Extract user_input (everything after first semicolon, before optional session_id)
-# - Extract session_id if present (after second semicolon)
-
-# Examples:
-# - "start; Analyze OAuth2" → execute_workflow(status="start", user_input="Analyze OAuth2", session_id=None)
-# - "approved; ; abc-123" → execute_workflow(status="approved", user_input="", session_id="abc-123")
-# - "edited; Add MFA; abc-123" → execute_workflow(status="edited", user_input="Add MFA", session_id="abc-123")
-
-# NEVER try to analyze or generate content yourself - ALWAYS delegate to execute_workflow.
-# Return the tool's response directly to the user without modification.""",
-#     tools=[workflow_tool],
-# )
-
-
 from google.adk.agents import Agent
 from a2a.client import ClientFactory, ClientConfig
 from a2a.types import TransportProtocol
@@ -372,15 +28,36 @@ toolbox = ToolboxSyncClient(URL, client_headers={"Authorization": auth_token_pro
 tools = toolbox.load_toolset()
 
 def create_client_factory():
-    credentials, _ = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-    credentials.refresh(Request())
-    httpx_client = httpx.AsyncClient(
+    """Create A2A client factory with automatic token refresh"""
+
+    class AutoRefreshHTTPXClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._credentials = None
+
+        def _get_fresh_credentials(self):
+            if self._credentials is None:
+                self._credentials, _ = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+
+            # Refresh if token is expired or about to expire
+            if not self._credentials.valid or self._credentials.expired:
+                self._credentials.refresh(Request())
+
+            return self._credentials
+
+        async def request(self, *args, **kwargs):
+            # Get fresh credentials and update auth header before each request
+            creds = self._get_fresh_credentials()
+            self.headers.update({"Authorization": f"Bearer {creds.token}"})
+            return await super().request(*args, **kwargs)
+
+    httpx_client = AutoRefreshHTTPXClient(
         headers={
-            "Authorization": f"Bearer {credentials.token}",
             "Content-Type": "application/json",
         },
         timeout=60.0,
     )
+
     return ClientFactory(
         ClientConfig(
             supported_transports=[TransportProtocol.http_json],
@@ -783,37 +460,37 @@ root_agent = Agent(
     **STATUS = 'start':**
     Step 1: Call execute_workflow("start", user_input, session_id)
     Step 2: Delegate to requirement_analyzer sub-agent with user_input
-    Step 3: AWAIT the analyzer agent response and 🚨 IMMEDIATELY after receiving analyzer response, ANALYZE if the response is GDPR COMPLIANT. If yes, CALL TOOL store-original-requirements:
-       - session_id: session_id from request
-       - analysis_response: [full text from analyzer response]
+    Step 3: 🚨 IMMEDIATELY after receiving analyzer response, CALL TOOL hitl-store-original-requirements with these parameters:
+       - session_id: [use the exact session_id from request]
+       - analysis_response: [pass the analyzer response as plain text without JSON wrapping]
     Step 4: After database confirms storage, extract cache_data from response and CALL TOOL cache-requirements-data:
-       - session_id: session_id
-       - requirements_data: [cache_data from Step 3 response]
+       - session_id: [same session_id]
+       - requirements_data: [use cache_data field from Step 3 database response]
     Step 5: After cache update, respond to user with database_result from Step 3
 
     **STATUS = 'refine':**
     Step 1: Call execute_workflow("refine", user_input, session_id)
     Step 2: Delegate to requirement_analyzer with enhanced prompt
-    Step 3: 🚨 IMMEDIATELY after receiving analyzer response, CALL TOOL hitl-refine-analysis-workflow:
-       - session_id: session_id from request
-       - refined_analysis: [analyzer response]
-       - human_feedback: user_input
-       - iteration_count: [from execute_workflow response]
+    Step 3: 🚨 IMMEDIATELY after receiving analyzer response, CALL TOOL hitl-refine-analysis-workflow with these parameters:
+       - session_id: [use the exact session_id from request]
+       - refined_analysis: [pass the analyzer response as plain text]
+       - human_feedback: [use the user_input as plain text]
+       - iteration_count: [extract number from execute_workflow response]
     Step 4: After database confirms storage, extract cache_data from response and CALL TOOL cache-requirements-data:
-       - session_id: session_id
-       - requirements_data: [cache_data from Step 3 response]
+       - session_id: [same session_id]
+       - requirements_data: [use cache_data field from Step 3 database response]
     Step 5: After cache update, respond to user with database_result from Step 3
 
     **STATUS = 'enhance':**
     Step 1: Call execute_workflow("enhance", user_input, session_id)
     Step 2: Delegate to requirement_analyzer with enhanced prompt
-    Step 3: 🚨 IMMEDIATELY after receiving analyzer response, CALL TOOL hitl-enhance-analysis-workflow:
-       - session_id: session_id from request
-       - enhanced_analysis: [analyzer response]
-       - enhancement_context: user_input
+    Step 3: 🚨 IMMEDIATELY after receiving analyzer response, CALL TOOL hitl-enhance-analysis-workflow with these parameters:
+       - session_id: [use the exact session_id from request]
+       - enhanced_analysis: [pass the analyzer response as plain text]
+       - enhancement_context: [use the user_input as plain text]
     Step 4: After database confirms storage, extract cache_data from response and CALL TOOL cache-requirements-data:
-       - session_id: session_id
-       - requirements_data: [cache_data from Step 3 response]
+       - session_id: [same session_id]
+       - requirements_data: [use cache_data field from Step 3 database response]
     Step 5: After cache update, respond to user with database_result from Step 3
 
     **STATUS = 'edited':**
@@ -858,15 +535,23 @@ root_agent = Agent(
     6. **Cache operations ensure data consistency between database and Redis cache**
     7. **Extract cache_data from database tool response JSON and pass as requirements_data/test_cases_data to cache tools**
     8. **Database tool responses contain: database_result (for user), cache_data (for caching), next_action (instruction)**
-    5. **Your thinking process:**
+    9. **CRITICAL: When calling tools, pass text data as plain strings - DO NOT wrap in JSON or add extra quotes**
+    10. **Your thinking process:**
        - "Got sub-agent response" → "Now I must call database tool" → "Database confirmed" → "Now I can respond to user"
 
-    🔒 CORRECT BEHAVIOR EXAMPLE:
+    � DATA HANDLING RULES 🚨
+    - Pass analyzer/generator responses as plain text strings to database tools
+    - Do NOT wrap responses in JSON format like {"response": "text"}
+    - Do NOT add extra escaping or quotes around the content
+    - Extract session_id, user_input as simple string values
+    - Use cache_data from database responses exactly as provided
+
+    �🔒 CORRECT BEHAVIOR EXAMPLE:
     - User: "start; Analyze OAuth flow; session_123"
     - You: [Call execute_workflow]
     - You: [Call requirement_analyzer sub-agent]
     - You: [Receive analyzer response: "Authentication requires OAuth 2.0..."]
-    - You: [IMMEDIATELY call hitl-store-original-requirements with that response]
+    - You: [IMMEDIATELY call store-original-requirements(session_id="session_123", analysis_response="Authentication requires OAuth 2.0...")]
     - You: [Get database confirmation]
     - You: "I've analyzed and stored your requirements. The analysis shows authentication requires OAuth 2.0..."
 
